@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智慧點名分組工具</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- PapaParse for CSV -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    
+    <!-- SheetJS for Excel (XLSX) support -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        body {
+            background-color: #f3f4f6;
+            font-family: 'Noto Sans TC', sans-serif;
+        }
+        .table-cell-min {
+            min-width: 60px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+        
+        // Icon Components
+        const UploadIcon = () => <i data-lucide="upload" className="w-8 h-8 mb-3 text-gray-400"></i>;
+        const CheckCircle = () => <i data-lucide="check-circle-2" className="w-5 h-5 text-green-500"></i>;
+        const XCircle = () => <i data-lucide="x-circle" className="w-5 h-5 text-red-200"></i>;
+        const UsersIcon = () => <i data-lucide="users" className="w-8 h-8 text-green-500 mb-3"></i>;
+        const FileIcon = () => <i data-lucide="file-spreadsheet" className="w-8 h-8 text-blue-500 mb-3"></i>;
+        const AlertCircle = () => <i data-lucide="alert-circle" className="w-5 h-5 text-orange-500 mr-2"></i>;
+
+        // Reusable DropZone Component
+        const DropZone = ({ title, subText, accept, onFileSelect, fileName, colorClass, icon: Icon, inputId }) => {
+            const [isDragging, setIsDragging] = useState(false);
+            const fileInputRef = useRef(null);
+
+            // Re-scan icons when state changes to ensure SVG renders correctly after updates
+            useEffect(() => {
+                lucide.createIcons();
+            }, [isDragging, fileName]);
+
+            const handleDragOver = (e) => {
+                e.preventDefault();
+                setIsDragging(true);
+            };
+
+            const handleDragLeave = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+            };
+
+            const handleDrop = (e) => {
+                e.preventDefault();
+                setIsDragging(false);
+                const files = e.dataTransfer.files;
+                if (files && files.length > 0) {
+                    // Create a synthetic event to match the input onChange structure
+                    onFileSelect({ target: { files: files } });
+                }
+            };
+
+            const handleClick = () => {
+                fileInputRef.current.click();
+            };
+
+            const baseStyle = "relative flex flex-col items-center justify-center p-8 rounded-xl border-2 border-dashed transition-all duration-200 cursor-pointer min-h-[200px] text-center bg-white shadow-sm";
+            
+            const activeStyle = colorClass === 'blue'
+                ? (isDragging 
+                    ? "border-blue-500 bg-blue-50 scale-[1.02] shadow-md ring-2 ring-blue-200" 
+                    : "border-blue-200 hover:border-blue-400 hover:bg-gray-50")
+                : (isDragging 
+                    ? "border-green-500 bg-green-50 scale-[1.02] shadow-md ring-2 ring-green-200" 
+                    : "border-green-200 hover:border-green-400 hover:bg-gray-50");
+
+            const badgeColor = colorClass === 'blue' 
+                ? "bg-blue-50 text-blue-600" 
+                : "bg-green-50 text-green-600";
+
+            return (
+                <div 
+                    className={`${baseStyle} ${activeStyle}`}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    onClick={handleClick}
+                >
+                    <Icon />
+                    <span className="text-base font-bold text-gray-700">{title}</span>
+                    <span className="text-xs text-gray-500 mt-1 mb-4">{subText}</span>
+                    
+                    <input 
+                        ref={fileInputRef}
+                        id={inputId}
+                        type="file" 
+                        onChange={onFileSelect} 
+                        accept={accept} 
+                        className="hidden" 
+                    />
+                    
+                    <span className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${badgeColor}`}>
+                        {fileName ? (
+                            <span className="flex items-center gap-2">
+                                <i data-lucide="check" className="w-4 h-4"></i>
+                                {fileName}
+                            </span>
+                        ) : (
+                            isDragging ? "放開以開始上傳" : "點擊或拖移檔案至此"
+                        )}
+                    </span>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [attendanceData, setAttendanceData] = useState([]);
+            const [attendanceHeaders, setAttendanceHeaders] = useState([]);
+            const [groupMapping, setGroupMapping] = useState({}); // Name -> GroupName
+            const [groupList, setGroupList] = useState([]); // Array of Group Names
+            
+            const [attendanceFileName, setAttendanceFileName] = useState("");
+            const [groupFileName, setGroupFileName] = useState("");
+
+            useEffect(() => {
+                lucide.createIcons();
+            }, [attendanceData, groupMapping]);
+
+            // Process Group CSV
+            const handleGroupUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setGroupFileName(file.name);
+
+                Papa.parse(file, {
+                    header: false, // We read as array of arrays to handle columns manually
+                    skipEmptyLines: true,
+                    complete: (results) => {
+                        const rows = results.data;
+                        if (rows.length === 0) return;
+
+                        // Assuming first row is Group Names
+                        const groups = rows[0].map(g => g.trim()).filter(g => g);
+                        const mapping = {};
+
+                        // Iterate columns
+                        rows[0].forEach((groupName, colIndex) => {
+                            if (!groupName) return;
+                            // Iterate rows starting from index 1 for this column
+                            for (let i = 1; i < rows.length; i++) {
+                                const name = rows[i][colIndex]?.trim();
+                                if (name) {
+                                    mapping[name] = groupName;
+                                }
+                            }
+                        });
+
+                        setGroupList(groups);
+                        setGroupMapping(mapping);
+                    }
+                });
+            };
+
+            // Process Attendance File (CSV or Excel)
+            const handleAttendanceUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setAttendanceFileName(file.name);
+
+                const processData = (rawData) => {
+                    // 1. Find the Header Row (Look for "姓名" or "Name")
+                    let headerRowIndex = -1;
+                    for (let i = 0; i < Math.min(rawData.length, 20); i++) {
+                        const rowStr = JSON.stringify(rawData[i]);
+                        if (rowStr.includes("姓名")) {
+                            headerRowIndex = i;
+                            break;
+                        }
+                    }
+
+                    if (headerRowIndex === -1) {
+                        alert("找不到含有「姓名」的標題列，請確認檔案格式。");
+                        return;
+                    }
+
+                    const headers = rawData[headerRowIndex].map(h => h ? h.toString().trim().replace(/\n/g, '') : "");
+                    const nameIndex = headers.indexOf("姓名");
+                    
+                    if (nameIndex === -1) {
+                        alert("找不到「姓名」欄位");
+                        return;
+                    }
+
+                    // Identify Date Columns (Usually contain / or numbers, exclude metadata columns)
+                    // Heuristic: Columns after "護持費" or specific known columns, or matching date pattern
+                    const dateIndices = [];
+                    const dateHeaders = [];
+                    
+                    headers.forEach((h, idx) => {
+                        // Simple logic: if it contains a slash / or is distinct from metadata
+                        const isMetadata = ["序號", "分類", "姓名", "接引人", "班別", "護持費", "5月護持費"].some(m => h.includes(m));
+                        if (!isMetadata && h.length > 0) {
+                            dateIndices.push(idx);
+                            dateHeaders.push(h);
+                        }
+                    });
+
+                    setAttendanceHeaders(dateHeaders);
+
+                    // 2. Parse Rows
+                    const parsedData = [];
+                    for (let i = headerRowIndex + 1; i < rawData.length; i++) {
+                        const row = rawData[i];
+                        // Skip empty rows
+                        if (!row || row.length <= nameIndex || !row[nameIndex]) continue;
+
+                        const name = row[nameIndex].toString().trim();
+                        const record = {
+                            name: name,
+                            attendance: {}
+                        };
+
+                        let presentCount = 0;
+                        dateIndices.forEach((colIdx, k) => {
+                            const val = row[colIdx] ? row[colIdx].toString().trim() : "";
+                            const dateKey = dateHeaders[k];
+                            record.attendance[dateKey] = val;
+                            if (val) presentCount++;
+                        });
+                        record.presentCount = presentCount;
+
+                        parsedData.push(record);
+                    }
+                    setAttendanceData(parsedData);
+                };
+
+                // Check file extension
+                if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+                    const reader = new FileReader();
+                    reader.onload = (evt) => {
+                        const bstr = evt.target.result;
+                        const wb = XLSX.read(bstr, { type: 'binary' });
+                        const wsname = wb.SheetNames[0];
+                        const ws = wb.Sheets[wsname];
+                        const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+                        processData(data);
+                    };
+                    reader.readAsBinaryString(file);
+                } else {
+                    // CSV
+                    Papa.parse(file, {
+                        header: false,
+                        skipEmptyLines: true,
+                        complete: (results) => {
+                            processData(results.data);
+                        }
+                    });
+                }
+            };
+
+            // Merge Data
+            const mergedData = useMemo(() => {
+                if (attendanceData.length === 0) return {};
+
+                const grouped = {};
+                
+                // Initialize groups
+                groupList.forEach(g => grouped[g] = []);
+                grouped["未分組"] = [];
+
+                attendanceData.forEach(person => {
+                    const groupName = groupMapping[person.name] || "未分組";
+                    if (!grouped[groupName]) {
+                        // In case group csv didn't cover a group defined elsewhere or just fallback
+                        grouped[groupName] = [];
+                    }
+                    grouped[groupName].push(person);
+                });
+
+                return grouped;
+            }, [attendanceData, groupMapping, groupList]);
+
+            const hasData = attendanceData.length > 0;
+
+            return (
+                <div className="min-h-screen p-6 max-w-7xl mx-auto">
+                    <header className="mb-8 text-center">
+                        <h1 className="text-3xl font-bold text-gray-800 mb-2">智慧點名分組工具</h1>
+                        <p className="text-gray-600">上傳點名表與分組名單，自動整合出席狀況</p>
+                    </header>
+
+                    {/* Upload Section - Drag & Drop */}
+                    <div className="grid md:grid-cols-2 gap-6 mb-8">
+                        <DropZone 
+                            title="步驟 1: 上傳點名表"
+                            subText="(支援 .xlsx, .csv)"
+                            accept=".csv, .xlsx, .xls"
+                            onFileSelect={handleAttendanceUpload}
+                            fileName={attendanceFileName}
+                            colorClass="blue"
+                            icon={FileIcon}
+                            inputId="attendance-upload"
+                        />
+                        <DropZone 
+                            title="步驟 2: 上傳分組名單"
+                            subText="(支援 .csv)"
+                            accept=".csv"
+                            onFileSelect={handleGroupUpload}
+                            fileName={groupFileName}
+                            colorClass="green"
+                            icon={UsersIcon}
+                            inputId="group-upload"
+                        />
+                    </div>
+
+                    {/* Results Section */}
+                    {hasData && (
+                        <div className="space-y-8">
+                            {/* Render Defined Groups First */}
+                            {groupList.map(groupName => (
+                                <GroupSection 
+                                    key={groupName} 
+                                    title={groupName} 
+                                    members={mergedData[groupName] || []} 
+                                    headers={attendanceHeaders}
+                                    color="blue"
+                                />
+                            ))}
+
+                            {/* Render Ungrouped */}
+                            {(mergedData["未分組"] && mergedData["未分組"].length > 0) && (
+                                <GroupSection 
+                                    title="未分組人員" 
+                                    members={mergedData["未分組"]} 
+                                    headers={attendanceHeaders}
+                                    color="orange"
+                                    isWarning={true}
+                                />
+                            )}
+                        </div>
+                    )}
+                    
+                    {!hasData && attendanceFileName && (
+                        <div className="text-center text-gray-400 py-12">
+                            正在處理或等待資料...
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const GroupSection = ({ title, members, headers, color, isWarning }) => {
+            if (members.length === 0) return null;
+
+            const headerBg = isWarning ? "bg-orange-600" : "bg-slate-700";
+            const cardBorder = isWarning ? "border-orange-200" : "border-slate-200";
+
+            return (
+                <div className={`bg-white rounded-lg shadow overflow-hidden border ${cardBorder}`}>
+                    <div className={`${headerBg} px-6 py-4 flex justify-between items-center text-white`}>
+                        <h2 className="text-lg font-bold flex items-center">
+                            {isWarning && <AlertCircle />}
+                            {title}
+                        </h2>
+                        <span className="bg-white/20 px-3 py-1 rounded-full text-sm">
+                            共 {members.length} 人
+                        </span>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-gray-50 text-gray-700 font-semibold border-b">
+                                <tr>
+                                    <th className="px-6 py-3 whitespace-nowrap sticky left-0 bg-gray-50 z-10 w-32 shadow-sm border-r">姓名</th>
+                                    {headers.map(h => (
+                                        <th key={h} className="px-4 py-3 text-center min-w-[80px]">{h}</th>
+                                    ))}
+                                    <th className="px-4 py-3 text-center">出席數</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-gray-100">
+                                {members.map((person, idx) => (
+                                    <tr key={idx} className="hover:bg-gray-50">
+                                        <td className="px-6 py-3 font-medium text-gray-900 sticky left-0 bg-white z-10 border-r shadow-sm">
+                                            {person.name}
+                                        </td>
+                                        {headers.map(date => {
+                                            const status = person.attendance[date];
+                                            return (
+                                                <td key={date} className="px-4 py-3 text-center border-l border-gray-50">
+                                                    {status ? (
+                                                        <div className="flex flex-col items-center justify-center">
+                                                            <CheckCircle />
+                                                            {status !== 'V' && <span className="text-[10px] text-gray-500 mt-1">{status}</span>}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="inline-block w-2 h-2 rounded-full bg-gray-200"></span>
+                                                    )}
+                                                </td>
+                                            );
+                                        })}
+                                        <td className="px-4 py-3 text-center font-bold text-blue-600 bg-blue-50/30">
+                                            {person.presentCount}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
